@@ -1,15 +1,18 @@
 [submodule "bstr"]
 	path = bstr
-	url = ./bstr
+	url = https://git.robur.coop/robur/bstr.git
 [submodule "digestif"]
 	path = digestif
-	url = ./digestif/
+	url = https://github.com/mirage/digestif.git
 [submodule "miou-solo5"]
 	path = miou-solo5
-	url = ./miou-solo5/
+	url = https://git.robur.coop/robur/miou-solo5
+	branch = unix
 [submodule "mirage-crypto"]
 	path = mirage-crypto
-	url = ./mirage-crypto
+	url = https://github.com/dinosaure/mirage-crypto.git
+	branch = miou-solo5
 [submodule "utcp"]
 	path = utcp
-	url = ./utcp
+	url = https://github.com/dinosaure/utcp.git
+	branch = miou-solo5
