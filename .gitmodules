@@ -1,0 +1,15 @@
+[submodule "bstr"]
+	path = bstr
+	url = ./bstr
+[submodule "digestif"]
+	path = digestif
+	url = ./digestif/
+[submodule "miou-solo5"]
+	path = miou-solo5
+	url = ./miou-solo5/
+[submodule "mirage-crypto"]
+	path = mirage-crypto
+	url = ./mirage-crypto
+[submodule "utcp"]
+	path = utcp
+	url = ./utcp
