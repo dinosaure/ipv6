@@ -1,0 +1,4 @@
+{ "devices": [
+    { "name": "service", "type": "NET_BASIC", "interface": "tap0" } ],
+  "type": "miou.solo5.profiling",
+  "version": 1 }
