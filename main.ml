@@ -1,17 +1,79 @@
 module RNG = Mirage_crypto_rng.Fortuna
+module Hash = Digestif.SHA1
 let ( let@ ) finally fn = Fun.protect ~finally fn
 
 let rng () = Mirage_crypto_rng_mkernel.initialize (module RNG)
 let rng = Mkernel.map rng Mkernel.[]
-let rec forever () = Mkernel.sleep 1_000_000_000; forever (Miou.yield ())
 
-let run _quiet cidr gateway _port =
+let handler flow =
+  let buf = Bytes.create 0x7ff in
+  let rec go () =
+    match Mnet.TCP.read flow buf with
+    | 0 -> ()
+    | len ->
+      let str = Bytes.sub_string buf 0 len in
+      Mnet.TCP.write flow str;
+      go () in
+  go ();
+  Logs.debug (fun m -> m "Close the connection");
+  Mnet.TCP.close flow
+
+let rec clean_up orphans = match Miou.care orphans with
+  | None | Some None -> ()
+  | Some (Some prm) ->
+      Miou.await_exn prm;
+      clean_up orphans
+
+let _1s = 1_000_000_000
+
+let run _quiet cidr gateway mode =
   Mkernel.(run [ rng; Mnet.stack ~name:"service" ?gateway cidr ])
-  @@ fun rng (daemon, _tcp, _udp) () ->
+  @@ fun rng (daemon, tcp, _udp) () ->
   let@ () = fun () -> Mnet.kill daemon in
   let@ () = fun () -> Mirage_crypto_rng_mkernel.kill rng in
-  let prm = Miou.async forever in
-  Miou.await_exn prm
+  match mode with
+  | `Server port ->
+      let rec go orphans listen =
+        clean_up orphans;
+        Logs.info (fun m -> m "Start to accept");
+        let flow = Mnet.TCP.accept tcp listen in
+        let _ = Miou.async ~orphans @@ fun () -> handler flow in
+        go orphans listen in
+      go (Miou.orphans ()) (Mnet.TCP.listen tcp port)
+  | `Client (edn, length) ->
+      let flow = Mnet.TCP.connect tcp edn in
+      let@ () = fun () -> Mnet.TCP.close flow in
+      let buf = Bytes.create 0x7ff in
+      let rec go ctx0 ctx1 rem recv =
+        if rem > 0 then begin
+          Mirage_crypto_rng.generate_into buf (Bytes.length buf);
+          let len = Int.min (Bytes.length buf) rem in
+          Mnet.TCP.write flow (Bytes.to_string buf) ~off:0 ~len;
+          let rem = rem - len in
+          let ctx1 = Hash.feed_bytes ctx1 ~off:0 ~len buf in
+          let len = Mnet.TCP.read flow buf in
+          let ctx0 = Hash.feed_bytes ctx0 ~off:0 ~len buf in
+          go ctx0 ctx1 rem (recv + len)
+        end else if length - recv > 0 then
+          let rec go ctx0 =
+            match Mnet.TCP.read flow buf with
+            | exception Mnet.Closed_by_peer | 0 -> (Hash.get ctx0, Hash.get ctx1)
+            | len ->
+              let ctx0 = Hash.feed_bytes ctx0 ~off:0 ~len buf in
+              go ctx0 in
+          Mnet.TCP.shutdown flow `write;
+          go ctx0
+        else (Hash.get ctx0, Hash.get ctx1) in
+      let hash0, hash1 = go Hash.empty Hash.empty length 0 in
+      if Hash.equal hash0 hash1 = false then exit 1;
+      Fmt.pr "recv: %a\n%!" Hash.pp hash0;
+      Fmt.pr "send: %a\n%!" Hash.pp hash1
+
+let run_client _quiet cidr gateway edn length =
+  run _quiet cidr gateway (`Client (edn, length))
+
+let run_server _quiet cidr gateway port =
+  run _quiet cidr gateway (`Server port)
 
 open Cmdliner
 
@@ -93,32 +155,66 @@ let setup_logs =
   Term.(const setup_logs $ utf_8 $ renderer $ setup_sources $ verbosity)
 
 let ipv4 =
-  let doc = "The IP address of the unikernel." in
+  let doc = "The IPv4 address of the unikernel." in
   let ipaddr = Arg.conv (Ipaddr.V4.Prefix.of_string, Ipaddr.V4.Prefix.pp) in
   let open Arg in
   required & opt (some ipaddr) None & info [ "ipv4" ] ~doc ~docv:"IPv4"
 
 let ipv4_gateway =
-  let doc = "The IP gateway." in
+  let doc = "The IPv4 gateway." in
   let ipaddr = Arg.conv (Ipaddr.V4.of_string, Ipaddr.V4.pp) in
   let open Arg in
   value & opt (some ipaddr) None & info [ "ipv4-gateway" ] ~doc ~docv:"IPv4"
 
 let port =
-  let doc = "The HTTP port" in
+  let doc = "The echo server port." in
   let open Arg in
-  value & opt int 80 & info [ "p"; "port" ] ~doc ~docv:"PORT"
+  value & opt int 9000 & info [ "p"; "port" ] ~doc ~docv:"PORT"
 
-let term =
+let length =
+  let doc = "Number of bytes we would like to send." in
+  let open Arg in
+  value & pos 1 int 4096 & info [] ~doc ~docv:"NUMBER"
+
+let addr =
+  let doc = "The address of the echo server." in
+  let parser = Ipaddr.with_port_of_string ~default:9000 in
+  let pp ppf (ipaddr, port) = Fmt.pf ppf "%a:%d" Ipaddr.pp ipaddr port in
+  let ipaddr_and_port = Arg.conv (parser, pp) in
+  let open Arg in
+  required & pos 0 (some ipaddr_and_port) None & info [] ~doc ~docv:"IP:PORT"
+
+let term_server =
   let open Term in
-  const run
+  const run_server
   $ setup_logs
   $ ipv4
   $ ipv4_gateway
   $ port
 
-let cmd =
-  let info = Cmd.info "ipv6" in
-  Cmd.v info term
+let cmd_server =
+  let info = Cmd.info "server" in
+  Cmd.v info term_server
 
-let () = Cmd.(exit @@ eval cmd)
+let term_client =
+  let open Term in
+  const run_client
+  $ setup_logs
+  $ ipv4
+  $ ipv4_gateway
+  $ addr
+  $ length
+
+let cmd_client =
+  let info = Cmd.info "client" in
+  Cmd.v info term_client
+
+let default =
+  let open Term in
+  ret (const (`Help (`Pager, None)))
+
+let () =
+  let doc = "A simple echo-server as an unikernel" in
+  let info = Cmd.info "echo" ~doc in
+  let cmd = Cmd.group ~default info [ cmd_server; cmd_client ] in
+  Cmd.(exit (eval cmd))
